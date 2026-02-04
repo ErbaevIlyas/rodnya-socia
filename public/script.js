@@ -2,10 +2,15 @@
 const socket = io();
 
 // Элементы DOM
+const loginModal = document.getElementById('login-modal');
+const mainContainer = document.getElementById('main-container');
+const loginUsernameInput = document.getElementById('login-username');
+const loginBtn = document.getElementById('login-btn');
+const logoutBtn = document.getElementById('logout-btn');
+const currentUserSpan = document.getElementById('current-user');
 const messagesContainer = document.getElementById('messages');
 const messageInput = document.getElementById('message-input');
 const sendBtn = document.getElementById('send-btn');
-const usernameInput = document.getElementById('username');
 const fileInput = document.getElementById('file-input');
 const fileUploadArea = document.getElementById('file-upload-area');
 const attachBtn = document.getElementById('attach-btn');
@@ -13,40 +18,75 @@ const emojiBtn = document.getElementById('emoji-btn');
 const voiceBtn = document.getElementById('voice-btn');
 const emojiPicker = document.getElementById('emoji-picker');
 const onlineCount = document.getElementById('online-count');
+const imagePreviewModal = document.getElementById('image-preview-modal');
+const previewImage = document.getElementById('preview-image');
+const imageCaptionInput = document.getElementById('image-caption');
+const sendPreviewBtn = document.getElementById('send-preview');
+const cancelPreviewBtn = document.getElementById('cancel-preview');
+const closePreviewBtn = document.getElementById('close-preview');
 
 // Переменные
+let currentUsername = '';
 let isRecording = false;
 let mediaRecorder;
 let recordedChunks = [];
+let currentPreviewFile = null;
 
 // Инициализация
 document.addEventListener('DOMContentLoaded', () => {
-    // Удаляем приветственное сообщение при первом сообщении
-    const welcomeMessage = document.querySelector('.welcome-message');
-    
-    // Фокус на поле ввода
-    messageInput.focus();
-    
-    // Загружаем имя пользователя из localStorage
     const savedUsername = localStorage.getItem('rodnya-username');
+    
     if (savedUsername) {
-        usernameInput.value = savedUsername;
+        currentUsername = savedUsername;
+        enterChat();
+    } else {
+        loginModal.style.display = 'flex';
+        loginUsernameInput.focus();
     }
 });
 
-// Сохранение имени пользователя
-usernameInput.addEventListener('change', () => {
-    localStorage.setItem('rodnya-username', usernameInput.value);
+// Вход в чат
+function enterChat() {
+    if (!currentUsername) {
+        currentUsername = loginUsernameInput.value.trim();
+        if (!currentUsername) {
+            alert('Пожалуйста, введите имя');
+            return;
+        }
+    }
+    
+    localStorage.setItem('rodnya-username', currentUsername);
+    currentUserSpan.textContent = `👤 ${currentUsername}`;
+    loginModal.style.display = 'none';
+    mainContainer.style.display = 'flex';
+    messageInput.focus();
+    
+    socket.emit('user-login', { username: currentUsername });
+}
+
+// Обработчики входа
+loginBtn.addEventListener('click', enterChat);
+loginUsernameInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+        enterChat();
+    }
+});
+
+// Выход из чата
+logoutBtn.addEventListener('click', () => {
+    localStorage.removeItem('rodnya-username');
+    currentUsername = '';
+    socket.emit('user-logout', {});
+    location.reload();
 });
 
 // Отправка сообщения
 function sendMessage() {
     const message = messageInput.value.trim();
-    const username = usernameInput.value.trim() || 'Аноним';
     
     if (message) {
         socket.emit('send-message', {
-            username: username,
+            username: currentUsername,
             message: message
         });
         
@@ -98,13 +138,51 @@ fileInput.addEventListener('change', (e) => {
 // Обработка файлов
 function handleFiles(files) {
     Array.from(files).forEach(file => {
-        uploadFile(file);
+        if (file.type.startsWith('image/')) {
+            showImagePreview(file);
+        } else {
+            uploadFile(file);
+        }
     });
     fileUploadArea.classList.remove('active');
 }
 
+// Предпросмотр изображения
+function showImagePreview(file) {
+    const reader = new FileReader();
+    
+    reader.onload = (e) => {
+        currentPreviewFile = file;
+        previewImage.src = e.target.result;
+        imageCaptionInput.value = '';
+        imagePreviewModal.classList.add('active');
+    };
+    
+    reader.readAsDataURL(file);
+}
+
+// Закрытие предпросмотра
+closePreviewBtn.addEventListener('click', () => {
+    imagePreviewModal.classList.remove('active');
+    currentPreviewFile = null;
+});
+
+cancelPreviewBtn.addEventListener('click', () => {
+    imagePreviewModal.classList.remove('active');
+    currentPreviewFile = null;
+});
+
+// Отправка изображения с подписью
+sendPreviewBtn.addEventListener('click', () => {
+    if (currentPreviewFile) {
+        uploadFile(currentPreviewFile, imageCaptionInput.value.trim());
+        imagePreviewModal.classList.remove('active');
+        currentPreviewFile = null;
+    }
+});
+
 // Загрузка файла
-async function uploadFile(file) {
+async function uploadFile(file, caption = '') {
     const formData = new FormData();
     formData.append('file', file);
     
@@ -117,14 +195,13 @@ async function uploadFile(file) {
         const result = await response.json();
         
         if (response.ok) {
-            const username = usernameInput.value.trim() || 'Аноним';
-            
             socket.emit('send-file', {
-                username: username,
+                username: currentUsername,
                 filename: result.filename,
                 originalname: result.originalname,
                 url: result.url,
-                mimetype: result.mimetype
+                mimetype: result.mimetype,
+                caption: caption
             });
             
             removeWelcomeMessage();
@@ -178,7 +255,6 @@ async function toggleRecording() {
                 const file = new File([blob], `voice-${Date.now()}.webm`, { type: 'audio/webm' });
                 uploadFile(file);
                 
-                // Останавливаем все треки
                 stream.getTracks().forEach(track => track.stop());
             };
             
@@ -203,22 +279,30 @@ socket.on('new-message', (data) => {
     displayMessage(data);
 });
 
-socket.on('user-joined', (data) => {
-    displayNotification(data.message);
-});
-
-socket.on('user-left', (data) => {
-    displayNotification(data.message);
+socket.on('online-count', (count) => {
+    onlineCount.textContent = count;
 });
 
 // Отображение сообщения
 function displayMessage(data) {
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message';
+    messageDiv.id = `msg-${data.id}`;
+    
+    let deleteBtn = '';
+    if (data.username === currentUsername) {
+        deleteBtn = `<button class="delete-btn" onclick="deleteMessage('${data.id}')">Удалить</button>`;
+    }
     
     if (data.type === 'file') {
         messageDiv.classList.add('file-message');
+        let captionHtml = '';
+        if (data.caption) {
+            captionHtml = `<div class="image-caption">"${data.caption}"</div>`;
+        }
+        
         messageDiv.innerHTML = `
+            ${deleteBtn}
             <div class="message-header">
                 <span class="username">${data.username}</span>
                 <span class="timestamp">${data.timestamp}</span>
@@ -229,10 +313,12 @@ function displayMessage(data) {
                     <span class="file-name">${data.originalname}</span>
                 </div>
                 ${getMediaPreview(data.url, data.mimetype, data.originalname)}
+                ${captionHtml}
             </div>
         `;
     } else {
         messageDiv.innerHTML = `
+            ${deleteBtn}
             <div class="message-header">
                 <span class="username">${data.username}</span>
                 <span class="timestamp">${data.timestamp}</span>
@@ -245,14 +331,15 @@ function displayMessage(data) {
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
-// Отображение уведомления
-function displayNotification(message) {
-    const notificationDiv = document.createElement('div');
-    notificationDiv.className = 'notification';
-    notificationDiv.textContent = message;
-    
-    messagesContainer.appendChild(notificationDiv);
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+// Удаление сообщения
+function deleteMessage(messageId) {
+    if (confirm('Удалить сообщение?')) {
+        socket.emit('delete-message', { id: messageId });
+        const messageDiv = document.getElementById(`msg-${messageId}`);
+        if (messageDiv) {
+            messageDiv.remove();
+        }
+    }
 }
 
 // Удаление приветственного сообщения

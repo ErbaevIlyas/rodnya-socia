@@ -56,15 +56,25 @@ app.post('/upload', upload.single('file'), (req, res) => {
 });
 
 // Socket.IO для реального времени
+const connectedUsers = new Set();
+
 io.on('connection', (socket) => {
     console.log('Пользователь подключился:', socket.id);
     
     // Присоединение к общему чату
     socket.join('general');
     
-    // Уведомление о подключении
-    socket.to('general').emit('user-joined', {
-        message: 'Новый пользователь присоединился к чату'
+    // Обработка входа пользователя
+    socket.on('user-login', (data) => {
+        socket.username = data.username;
+        connectedUsers.add(socket.id);
+        io.to('general').emit('online-count', connectedUsers.size);
+    });
+    
+    // Обработка выхода пользователя
+    socket.on('user-logout', () => {
+        connectedUsers.delete(socket.id);
+        io.to('general').emit('online-count', connectedUsers.size);
     });
     
     // Обработка сообщений
@@ -89,6 +99,7 @@ io.on('connection', (socket) => {
             originalname: data.originalname,
             url: data.url,
             mimetype: data.mimetype,
+            caption: data.caption || '',
             timestamp: new Date().toLocaleString('ru-RU'),
             type: 'file'
         };
@@ -96,12 +107,16 @@ io.on('connection', (socket) => {
         io.to('general').emit('new-message', messageData);
     });
     
+    // Удаление сообщения
+    socket.on('delete-message', (data) => {
+        io.to('general').emit('message-deleted', { id: data.id });
+    });
+    
     // Отключение
     socket.on('disconnect', () => {
         console.log('Пользователь отключился:', socket.id);
-        socket.to('general').emit('user-left', {
-            message: 'Пользователь покинул чат'
-        });
+        connectedUsers.delete(socket.id);
+        io.to('general').emit('online-count', connectedUsers.size);
     });
 });
 

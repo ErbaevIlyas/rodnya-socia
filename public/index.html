@@ -9,17 +9,33 @@
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#4facfe">
     <link rel="apple-touch-icon" href="icon-192.png">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='75' font-size='75'>👥</text></svg>">
 </head>
 <body>
-    <div class="container">
+    <div class="login-modal" id="login-modal">
+        <div class="login-container">
+            <div class="login-header">
+                <i class="fas fa-users"></i>
+                <h1>Родня</h1>
+            </div>
+            <p class="login-subtitle">Введите ваше имя для входа</p>
+            <input type="text" id="login-username" placeholder="Ваше имя" maxlength="20" autofocus>
+            <button class="login-btn" id="login-btn">Войти</button>
+        </div>
+    </div>
+
+    <div class="container" id="main-container" style="display: none;">
         <header class="header">
             <div class="logo">
                 <i class="fas fa-users"></i>
                 <h1>Родня</h1>
             </div>
             <div class="user-info">
-                <input type="text" id="username" placeholder="Ваше имя" maxlength="20">
+                <span class="current-user" id="current-user"></span>
                 <span class="online-count">Онлайн: <span id="online-count">1</span></span>
+                <button class="logout-btn" id="logout-btn" title="Выход">
+                    <i class="fas fa-sign-out-alt"></i>
+                </button>
             </div>
         </header>
 
@@ -38,6 +54,18 @@
                         <i class="fas fa-cloud-upload-alt"></i>
                         <span>Перетащите файлы сюда или нажмите для выбора</span>
                         <input type="file" id="file-input" multiple accept="image/*,video/*,audio/*">
+                    </div>
+
+                    <div class="image-preview-modal" id="image-preview-modal">
+                        <div class="preview-content">
+                            <button class="close-preview" id="close-preview">&times;</button>
+                            <img id="preview-image" src="" alt="Preview">
+                            <div class="preview-controls">
+                                <input type="text" id="image-caption" placeholder="Добавить подпись..." maxlength="200">
+                                <button class="preview-btn cancel" id="cancel-preview">Отмена</button>
+                                <button class="preview-btn send" id="send-preview">Отправить</button>
+                            </div>
+                        </div>
                     </div>
                     
                     <div class="input-area">
