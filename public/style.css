@@ -275,6 +275,8 @@ body {
     overflow-y: auto;
     padding: 1rem;
     background: #f8f9fa;
+    display: flex;
+    flex-direction: column;
 }
 
 .welcome-message {
@@ -296,12 +298,28 @@ body {
 
 .message {
     margin-bottom: 1rem;
-    padding: 1rem;
+    padding: 0.75rem 1rem;
     background: white;
     border-radius: 15px;
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
     animation: slideIn 0.3s ease-out;
     position: relative;
+    max-width: 70%;
+    word-wrap: break-word;
+}
+
+.message.own {
+    margin-left: auto;
+    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+    color: white;
+    border-bottom-right-radius: 5px;
+}
+
+.message.other {
+    margin-right: auto;
+    background: #f0f0f0;
+    color: #333;
+    border-bottom-left-radius: 5px;
 }
 
 .message:hover .delete-btn {
@@ -350,9 +368,25 @@ body {
     color: #4facfe;
 }
 
+.message.own .username {
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.message.other .username {
+    color: #4facfe;
+}
+
 .timestamp {
-    font-size: 0.8rem;
+    font-size: 0.75rem;
     color: #6c757d;
+}
+
+.message.own .timestamp {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.message.other .timestamp {
+    color: #999;
 }
 
 .message-content {

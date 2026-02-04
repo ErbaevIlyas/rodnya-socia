@@ -17,6 +17,8 @@ if (!fs.existsSync('uploads')) {
 // Простая база данных пользователей (в памяти)
 const users = new Map();
 const userSessions = new Map(); // socket.id -> username
+const messages = new Map(); // "user1-user2" -> [messages] для приватных
+const generalMessages = []; // Сообщения в общий чат
 
 // Настройка multer для загрузки файлов
 const storage = multer.diskStorage({
@@ -58,6 +60,11 @@ app.post('/upload', upload.single('file'), (req, res) => {
         url: `/uploads/${req.file.filename}`
     });
 });
+
+// Функция для получения ключа диалога
+function getDialogKey(user1, user2) {
+    return [user1, user2].sort().join('-');
+}
 
 // Socket.IO для реального времени
 const connectedUsers = new Map(); // socket.id -> {username, socketId}
@@ -109,11 +116,27 @@ io.on('connection', (socket) => {
         const onlineUsers = Array.from(connectedUsers.values()).map(u => u.username);
         io.emit('online-users', onlineUsers);
         
+        // Отправляем историю общего чата
+        socket.emit('load-general-messages', generalMessages);
+        
         // Уведомляем всех что пользователь онлайн
         io.to('general').emit('user-status', { 
             username: username, 
             status: 'online' 
         });
+    });
+    
+    // Загрузка истории приватного чата
+    socket.on('load-private-messages', (data) => {
+        const currentUser = userSessions.get(socket.id);
+        const otherUser = data.username;
+        
+        if (!currentUser) return;
+        
+        const dialogKey = getDialogKey(currentUser, otherUser);
+        const dialogMessages = messages.get(dialogKey) || [];
+        
+        socket.emit('private-messages-loaded', dialogMessages);
     });
     
     // Обработка сообщений в общий чат
@@ -129,6 +152,7 @@ io.on('connection', (socket) => {
             type: 'text'
         };
         
+        generalMessages.push(messageData);
         io.to('general').emit('new-message', messageData);
     });
     
@@ -149,6 +173,7 @@ io.on('connection', (socket) => {
             type: 'file'
         };
         
+        generalMessages.push(messageData);
         io.to('general').emit('new-message', messageData);
     });
     
@@ -181,6 +206,13 @@ io.on('connection', (socket) => {
             timestamp: new Date().toLocaleString('ru-RU'),
             type: 'text'
         };
+        
+        // Сохраняем сообщение
+        const dialogKey = getDialogKey(senderUsername, recipientUsername);
+        if (!messages.has(dialogKey)) {
+            messages.set(dialogKey, []);
+        }
+        messages.get(dialogKey).push(messageData);
         
         // Отправляем отправителю
         socket.emit('private-message', messageData);
@@ -219,6 +251,13 @@ io.on('connection', (socket) => {
             timestamp: new Date().toLocaleString('ru-RU'),
             type: 'file'
         };
+        
+        // Сохраняем сообщение
+        const dialogKey = getDialogKey(senderUsername, recipientUsername);
+        if (!messages.has(dialogKey)) {
+            messages.set(dialogKey, []);
+        }
+        messages.get(dialogKey).push(messageData);
         
         // Отправляем отправителю
         socket.emit('private-message', messageData);

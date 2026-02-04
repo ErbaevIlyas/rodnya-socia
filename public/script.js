@@ -205,6 +205,10 @@ function openPrivateChat(username) {
     chatHeader.innerHTML = `<h2>💬 ${username}</h2>`;
     messagesContainer.innerHTML = '';
     updateUsersList();
+    
+    // Загружаем историю сообщений
+    socket.emit('load-private-messages', { username: username });
+    
     messageInput.focus();
 }
 
@@ -429,6 +433,16 @@ socket.on('new-message', (data) => {
     }
 });
 
+socket.on('load-general-messages', (loadedMessages) => {
+    messagesContainer.innerHTML = '';
+    loadedMessages.forEach(msg => displayMessage(msg));
+});
+
+socket.on('private-messages-loaded', (loadedMessages) => {
+    messagesContainer.innerHTML = '';
+    loadedMessages.forEach(msg => displayMessage(msg));
+});
+
 socket.on('private-message', (data) => {
     // Если это сообщение от текущего чата или от нас
     if (data.from === currentChatUser || data.to === currentChatUser) {
@@ -449,8 +463,12 @@ function displayMessage(data) {
     messageDiv.className = 'message';
     messageDiv.id = `msg-${data.id}`;
     
+    // Определяем свое ли это сообщение
+    const isOwn = data.username === currentUsername || data.from === currentUsername;
+    messageDiv.classList.add(isOwn ? 'own' : 'other');
+    
     let deleteBtn = '';
-    if (data.username === currentUsername || data.from === currentUsername) {
+    if (isOwn) {
         deleteBtn = `<button class="delete-btn" onclick="deleteMessage('${data.id}')">Удалить</button>`;
     }
     
