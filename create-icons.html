@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Создание иконок</title>
+</head>
+<body>
+    <canvas id="canvas" width="512" height="512"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Создаем градиентный фон
+        const gradient = ctx.createLinearGradient(0, 0, 512, 512);
+        gradient.addColorStop(0, '#4facfe');
+        gradient.addColorStop(1, '#00f2fe');
+        
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 512, 512);
+        
+        // Добавляем иконку семьи
+        ctx.fillStyle = 'white';
+        ctx.font = 'bold 200px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('👥', 256, 256);
+        
+        // Скачиваем как 512x512
+        const link512 = document.createElement('a');
+        link512.download = 'icon-512.png';
+        link512.href = canvas.toDataURL();
+        link512.click();
+        
+        // Создаем 192x192
+        const canvas192 = document.createElement('canvas');
+        canvas192.width = 192;
+        canvas192.height = 192;
+        const ctx192 = canvas192.getContext('2d');
+        ctx192.drawImage(canvas, 0, 0, 192, 192);
+        
+        const link192 = document.createElement('a');
+        link192.download = 'icon-192.png';
+        link192.href = canvas192.toDataURL();
+        link192.click();
+    </script>
+</body>
+</html>
