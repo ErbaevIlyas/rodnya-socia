@@ -14,6 +14,10 @@ if (!fs.existsSync('uploads')) {
     fs.mkdirSync('uploads');
 }
 
+// Простая база данных пользователей (в памяти)
+const users = new Map();
+const userSessions = new Map(); // socket.id -> username
+
 // Настройка multer для загрузки файлов
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -56,7 +60,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
 });
 
 // Socket.IO для реального времени
-const connectedUsers = new Set();
+const connectedUsers = new Map(); // socket.id -> {username, socketId}
 
 io.on('connection', (socket) => {
     console.log('Пользователь подключился:', socket.id);
@@ -64,24 +68,62 @@ io.on('connection', (socket) => {
     // Присоединение к общему чату
     socket.join('general');
     
-    // Обработка входа пользователя
-    socket.on('user-login', (data) => {
-        socket.username = data.username;
-        connectedUsers.add(socket.id);
-        io.to('general').emit('online-count', connectedUsers.size);
+    // Регистрация пользователя
+    socket.on('register', (data) => {
+        const { username, password } = data;
+        
+        if (users.has(username)) {
+            socket.emit('register-response', { success: false, message: 'Пользователь уже существует' });
+            return;
+        }
+        
+        users.set(username, { password, createdAt: new Date() });
+        socket.emit('register-response', { success: true, message: 'Регистрация успешна' });
     });
     
-    // Обработка выхода пользователя
-    socket.on('user-logout', () => {
-        connectedUsers.delete(socket.id);
-        io.to('general').emit('online-count', connectedUsers.size);
+    // Вход пользователя
+    socket.on('login', (data) => {
+        const { username, password } = data;
+        
+        if (!users.has(username)) {
+            socket.emit('login-response', { success: false, message: 'Пользователь не найден' });
+            return;
+        }
+        
+        const user = users.get(username);
+        if (user.password !== password) {
+            socket.emit('login-response', { success: false, message: 'Неверный пароль' });
+            return;
+        }
+        
+        userSessions.set(socket.id, username);
+        connectedUsers.set(socket.id, { username, socketId: socket.id });
+        
+        socket.emit('login-response', { success: true, message: 'Вход успешен' });
+        
+        // Отправляем список всех пользователей
+        const usersList = Array.from(users.keys());
+        socket.emit('users-list', usersList);
+        
+        // Отправляем список онлайн пользователей
+        const onlineUsers = Array.from(connectedUsers.values()).map(u => u.username);
+        io.emit('online-users', onlineUsers);
+        
+        // Уведомляем всех что пользователь онлайн
+        io.to('general').emit('user-status', { 
+            username: username, 
+            status: 'online' 
+        });
     });
     
-    // Обработка сообщений
+    // Обработка сообщений в общий чат
     socket.on('send-message', (data) => {
+        const username = userSessions.get(socket.id);
+        if (!username) return;
+        
         const messageData = {
             id: Date.now(),
-            username: data.username || 'Аноним',
+            username: username,
             message: data.message,
             timestamp: new Date().toLocaleString('ru-RU'),
             type: 'text'
@@ -90,11 +132,14 @@ io.on('connection', (socket) => {
         io.to('general').emit('new-message', messageData);
     });
     
-    // Обработка файлов
+    // Обработка файлов в общий чат
     socket.on('send-file', (data) => {
+        const username = userSessions.get(socket.id);
+        if (!username) return;
+        
         const messageData = {
             id: Date.now(),
-            username: data.username || 'Аноним',
+            username: username,
             filename: data.filename,
             originalname: data.originalname,
             url: data.url,
@@ -112,11 +157,95 @@ io.on('connection', (socket) => {
         io.to('general').emit('message-deleted', { id: data.id });
     });
     
+    // Личные сообщения
+    socket.on('send-private-message', (data) => {
+        const senderUsername = userSessions.get(socket.id);
+        if (!senderUsername) return;
+        
+        const { recipientUsername, message } = data;
+        
+        // Находим socket ID получателя
+        let recipientSocketId = null;
+        for (const [socketId, user] of connectedUsers.entries()) {
+            if (user.username === recipientUsername) {
+                recipientSocketId = socketId;
+                break;
+            }
+        }
+        
+        const messageData = {
+            id: Date.now(),
+            from: senderUsername,
+            to: recipientUsername,
+            message: message,
+            timestamp: new Date().toLocaleString('ru-RU'),
+            type: 'text'
+        };
+        
+        // Отправляем отправителю
+        socket.emit('private-message', messageData);
+        
+        // Отправляем получателю если онлайн
+        if (recipientSocketId) {
+            io.to(recipientSocketId).emit('private-message', messageData);
+        }
+    });
+    
+    // Личные файлы
+    socket.on('send-private-file', (data) => {
+        const senderUsername = userSessions.get(socket.id);
+        if (!senderUsername) return;
+        
+        const { recipientUsername, filename, originalname, url, mimetype, caption } = data;
+        
+        // Находим socket ID получателя
+        let recipientSocketId = null;
+        for (const [socketId, user] of connectedUsers.entries()) {
+            if (user.username === recipientUsername) {
+                recipientSocketId = socketId;
+                break;
+            }
+        }
+        
+        const messageData = {
+            id: Date.now(),
+            from: senderUsername,
+            to: recipientUsername,
+            filename: filename,
+            originalname: originalname,
+            url: url,
+            mimetype: mimetype,
+            caption: caption || '',
+            timestamp: new Date().toLocaleString('ru-RU'),
+            type: 'file'
+        };
+        
+        // Отправляем отправителю
+        socket.emit('private-message', messageData);
+        
+        // Отправляем получателю если онлайн
+        if (recipientSocketId) {
+            io.to(recipientSocketId).emit('private-message', messageData);
+        }
+    });
+    
     // Отключение
     socket.on('disconnect', () => {
         console.log('Пользователь отключился:', socket.id);
+        const username = userSessions.get(socket.id);
+        
+        userSessions.delete(socket.id);
         connectedUsers.delete(socket.id);
-        io.to('general').emit('online-count', connectedUsers.size);
+        
+        if (username) {
+            const onlineUsers = Array.from(connectedUsers.values()).map(u => u.username);
+            io.emit('online-users', onlineUsers);
+            
+            io.to('general').emit('user-status', { 
+                username: username, 
+                status: 'offline' 
+            });
+        }
     });
 });
 

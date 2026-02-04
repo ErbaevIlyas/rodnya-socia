@@ -1,13 +1,22 @@
 // Подключение к Socket.IO
 const socket = io();
 
-// Элементы DOM
-const loginModal = document.getElementById('login-modal');
-const mainContainer = document.getElementById('main-container');
+// Элементы DOM - Авторизация
+const authModal = document.getElementById('auth-modal');
+const loginForm = document.getElementById('login-form');
+const registerForm = document.getElementById('register-form');
 const loginUsernameInput = document.getElementById('login-username');
+const loginPasswordInput = document.getElementById('login-password');
 const loginBtn = document.getElementById('login-btn');
-const logoutBtn = document.getElementById('logout-btn');
+const registerUsernameInput = document.getElementById('register-username');
+const registerPasswordInput = document.getElementById('register-password');
+const registerPasswordConfirmInput = document.getElementById('register-password-confirm');
+const registerBtn = document.getElementById('register-btn');
+
+// Элементы DOM - Главное приложение
+const mainContainer = document.getElementById('main-container');
 const currentUserSpan = document.getElementById('current-user');
+const logoutBtn = document.getElementById('logout-btn');
 const messagesContainer = document.getElementById('messages');
 const messageInput = document.getElementById('message-input');
 const sendBtn = document.getElementById('send-btn');
@@ -24,71 +33,198 @@ const imageCaptionInput = document.getElementById('image-caption');
 const sendPreviewBtn = document.getElementById('send-preview');
 const cancelPreviewBtn = document.getElementById('cancel-preview');
 const closePreviewBtn = document.getElementById('close-preview');
+const usersList = document.getElementById('users-list');
+const chatHeader = document.getElementById('chat-header');
 
 // Переменные
 let currentUsername = '';
+let currentChatUser = null; // Для личных сообщений
 let isRecording = false;
 let mediaRecorder;
 let recordedChunks = [];
 let currentPreviewFile = null;
+let allUsers = [];
 
 // Инициализация
 document.addEventListener('DOMContentLoaded', () => {
-    const savedUsername = localStorage.getItem('rodnya-username');
-    
-    if (savedUsername) {
-        currentUsername = savedUsername;
-        enterChat();
-    } else {
-        loginModal.style.display = 'flex';
-        loginUsernameInput.focus();
-    }
+    loginUsernameInput.focus();
 });
 
-// Вход в чат
-function enterChat() {
-    if (!currentUsername) {
-        currentUsername = loginUsernameInput.value.trim();
-        if (!currentUsername) {
-            alert('Пожалуйста, введите имя');
-            return;
-        }
+// Переключение между формами
+function toggleAuthForm() {
+    loginForm.style.display = loginForm.style.display === 'none' ? 'block' : 'none';
+    registerForm.style.display = registerForm.style.display === 'none' ? 'block' : 'none';
+    
+    if (loginForm.style.display === 'block') {
+        loginUsernameInput.focus();
+    } else {
+        registerUsernameInput.focus();
     }
-    
-    localStorage.setItem('rodnya-username', currentUsername);
-    currentUserSpan.textContent = `👤 ${currentUsername}`;
-    loginModal.style.display = 'none';
-    mainContainer.style.display = 'flex';
-    messageInput.focus();
-    
-    socket.emit('user-login', { username: currentUsername });
 }
 
-// Обработчики входа
-loginBtn.addEventListener('click', enterChat);
+// Регистрация
+registerBtn.addEventListener('click', () => {
+    const username = registerUsernameInput.value.trim();
+    const password = registerPasswordInput.value.trim();
+    const passwordConfirm = registerPasswordConfirmInput.value.trim();
+    
+    if (!username || !password) {
+        alert('Заполните все поля');
+        return;
+    }
+    
+    if (password !== passwordConfirm) {
+        alert('Пароли не совпадают');
+        return;
+    }
+    
+    if (password.length < 3) {
+        alert('Пароль должен быть минимум 3 символа');
+        return;
+    }
+    
+    socket.emit('register', { username, password });
+});
+
+// Вход
+loginBtn.addEventListener('click', () => {
+    const username = loginUsernameInput.value.trim();
+    const password = loginPasswordInput.value.trim();
+    
+    if (!username || !password) {
+        alert('Заполните все поля');
+        return;
+    }
+    
+    socket.emit('login', { username, password });
+});
+
+// Обработчики Enter
 loginUsernameInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-        enterChat();
+    if (e.key === 'Enter') loginPasswordInput.focus();
+});
+
+loginPasswordInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') loginBtn.click();
+});
+
+registerUsernameInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') registerPasswordInput.focus();
+});
+
+registerPasswordInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') registerPasswordConfirmInput.focus();
+});
+
+registerPasswordConfirmInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') registerBtn.click();
+});
+
+// Socket события - Авторизация
+socket.on('register-response', (data) => {
+    if (data.success) {
+        alert('Регистрация успешна! Теперь войдите');
+        toggleAuthForm();
+        registerUsernameInput.value = '';
+        registerPasswordInput.value = '';
+        registerPasswordConfirmInput.value = '';
+    } else {
+        alert('Ошибка: ' + data.message);
     }
 });
 
-// Выход из чата
-logoutBtn.addEventListener('click', () => {
-    localStorage.removeItem('rodnya-username');
-    currentUsername = '';
-    socket.emit('user-logout', {});
-    location.reload();
+socket.on('login-response', (data) => {
+    if (data.success) {
+        currentUsername = loginUsernameInput.value.trim();
+        currentUserSpan.textContent = `👤 ${currentUsername}`;
+        authModal.style.display = 'none';
+        mainContainer.style.display = 'flex';
+        messageInput.focus();
+        
+        // Очищаем форму
+        loginUsernameInput.value = '';
+        loginPasswordInput.value = '';
+    } else {
+        alert('Ошибка: ' + data.message);
+    }
 });
+
+socket.on('users-list', (users) => {
+    allUsers = users;
+    updateUsersList();
+});
+
+socket.on('online-users', (onlineUsers) => {
+    onlineCount.textContent = onlineUsers.length;
+    updateUsersList();
+});
+
+// Выход
+logoutBtn.addEventListener('click', () => {
+    currentUsername = '';
+    currentChatUser = null;
+    authModal.style.display = 'flex';
+    mainContainer.style.display = 'none';
+    messagesContainer.innerHTML = '<div class="welcome-message"><i class="fas fa-heart"></i><h2>Добро пожаловать в Родню!</h2><p>Общайтесь с близкими, делитесь моментами жизни</p></div>';
+    loginForm.style.display = 'block';
+    registerForm.style.display = 'none';
+    loginUsernameInput.focus();
+});
+
+// Обновление списка пользователей
+function updateUsersList() {
+    usersList.innerHTML = '';
+    
+    allUsers.forEach(user => {
+        if (user === currentUsername) return; // Не показываем себя
+        
+        const userItem = document.createElement('div');
+        userItem.className = 'user-item';
+        if (user === currentChatUser) userItem.classList.add('active');
+        
+        const statusDot = document.createElement('div');
+        statusDot.className = 'user-status';
+        
+        const userName = document.createElement('span');
+        userName.textContent = user;
+        
+        userItem.appendChild(statusDot);
+        userItem.appendChild(userName);
+        
+        userItem.addEventListener('click', () => {
+            openPrivateChat(user);
+        });
+        
+        usersList.appendChild(userItem);
+    });
+}
+
+// Открытие приватного чата
+function openPrivateChat(username) {
+    currentChatUser = username;
+    chatHeader.innerHTML = `<h2>💬 ${username}</h2>`;
+    messagesContainer.innerHTML = '';
+    updateUsersList();
+    messageInput.focus();
+}
 
 // Отправка сообщения
 function sendMessage() {
     const message = messageInput.value.trim();
     
     if (message) {
-        socket.emit('send-message', {
-            username: currentUsername,
-            message: message
-        });
+        if (currentChatUser) {
+            // Приватное сообщение
+            socket.emit('send-private-message', {
+                recipientUsername: currentChatUser,
+                message: message
+            });
+        } else {
+            // Общий чат
+            socket.emit('send-message', {
+                message: message
+            });
+        }
         
         messageInput.value = '';
         removeWelcomeMessage();
@@ -195,14 +331,26 @@ async function uploadFile(file, caption = '') {
         const result = await response.json();
         
         if (response.ok) {
-            socket.emit('send-file', {
-                username: currentUsername,
-                filename: result.filename,
-                originalname: result.originalname,
-                url: result.url,
-                mimetype: result.mimetype,
-                caption: caption
-            });
+            if (currentChatUser) {
+                // Приватный файл
+                socket.emit('send-private-file', {
+                    recipientUsername: currentChatUser,
+                    filename: result.filename,
+                    originalname: result.originalname,
+                    url: result.url,
+                    mimetype: result.mimetype,
+                    caption: caption
+                });
+            } else {
+                // Файл в общий чат
+                socket.emit('send-file', {
+                    filename: result.filename,
+                    originalname: result.originalname,
+                    url: result.url,
+                    mimetype: result.mimetype,
+                    caption: caption
+                });
+            }
             
             removeWelcomeMessage();
         } else {
@@ -274,13 +422,25 @@ async function toggleRecording() {
     }
 }
 
-// Socket.IO события
+// Socket события - Сообщения
 socket.on('new-message', (data) => {
-    displayMessage(data);
+    if (!currentChatUser) { // Показываем только если в общем чате
+        displayMessage(data);
+    }
 });
 
-socket.on('online-count', (count) => {
-    onlineCount.textContent = count;
+socket.on('private-message', (data) => {
+    // Если это сообщение от текущего чата или от нас
+    if (data.from === currentChatUser || data.to === currentChatUser) {
+        displayMessage(data);
+    }
+});
+
+socket.on('message-deleted', (data) => {
+    const messageDiv = document.getElementById(`msg-${data.id}`);
+    if (messageDiv) {
+        messageDiv.remove();
+    }
 });
 
 // Отображение сообщения
@@ -290,9 +450,11 @@ function displayMessage(data) {
     messageDiv.id = `msg-${data.id}`;
     
     let deleteBtn = '';
-    if (data.username === currentUsername) {
+    if (data.username === currentUsername || data.from === currentUsername) {
         deleteBtn = `<button class="delete-btn" onclick="deleteMessage('${data.id}')">Удалить</button>`;
     }
+    
+    const senderName = data.username || data.from;
     
     if (data.type === 'file') {
         messageDiv.classList.add('file-message');
@@ -304,7 +466,7 @@ function displayMessage(data) {
         messageDiv.innerHTML = `
             ${deleteBtn}
             <div class="message-header">
-                <span class="username">${data.username}</span>
+                <span class="username">${senderName}</span>
                 <span class="timestamp">${data.timestamp}</span>
             </div>
             <div class="message-content">
@@ -320,7 +482,7 @@ function displayMessage(data) {
         messageDiv.innerHTML = `
             ${deleteBtn}
             <div class="message-header">
-                <span class="username">${data.username}</span>
+                <span class="username">${senderName}</span>
                 <span class="timestamp">${data.timestamp}</span>
             </div>
             <div class="message-content">${data.message}</div>
