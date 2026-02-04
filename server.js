@@ -4,41 +4,59 @@ const socketIo = require('socket.io');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { MongoClient } = require('mongodb');
+const sqlite3 = require('sqlite3').verbose();
 require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
 
-// MongoDB подключение
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://rodnya:PASSWORD@rodnya.be3oe9w.mongodb.net/?appName=rodnya';
-let db;
-let usersCollection;
-let messagesCollection;
-
-const client = new MongoClient(MONGODB_URI);
-
-async function connectDB() {
-    try {
-        await client.connect();
-        console.log('✅ Подключено к MongoDB');
-        
-        db = client.db('rodnya');
-        usersCollection = db.collection('users');
-        messagesCollection = db.collection('messages');
-        
-        // Создаем индексы для оптимизации
-        await usersCollection.createIndex({ username: 1 }, { unique: true });
-        await messagesCollection.createIndex({ createdAt: -1 });
-        
-    } catch (err) {
-        console.error('❌ Ошибка подключения к MongoDB:', err);
+// SQLite БД
+const db = new sqlite3.Database('./rodnya.db', (err) => {
+    if (err) {
+        console.error('❌ Ошибка подключения к БД:', err.message);
         process.exit(1);
     }
-}
+    console.log('✅ Подключено к SQLite БД');
+    initializeDB();
+});
 
-connectDB();
+// Инициализация БД
+function initializeDB() {
+    // Таблица пользователей
+    db.run(`
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    `, (err) => {
+        if (err) console.error('Ошибка создания таблицы users:', err);
+        else console.log('✅ Таблица users готова');
+    });
+
+    // Таблица сообщений
+    db.run(`
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fromUser TEXT NOT NULL,
+            toUser TEXT NOT NULL,
+            message TEXT,
+            filename TEXT,
+            originalname TEXT,
+            url TEXT,
+            mimetype TEXT,
+            caption TEXT,
+            type TEXT DEFAULT 'text',
+            isGeneral INTEGER DEFAULT 0,
+            createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    `, (err) => {
+        if (err) console.error('Ошибка создания таблицы messages:', err);
+        else console.log('✅ Таблица messages готова');
+    });
+}
 
 // Создаем папку для загрузок если её нет
 if (!fs.existsSync('uploads')) {
@@ -86,345 +104,354 @@ app.post('/upload', upload.single('file'), (req, res) => {
     });
 });
 
-// Функция для получения ключа диалога
-function getDialogKey(user1, user2) {
-    return [user1, user2].sort().join('-');
-}
-
 // Socket.IO для реального времени
 const connectedUsers = new Map(); // socket.id -> {username, socketId}
 
 io.on('connection', (socket) => {
-    console.log('Пользователь подключился:', socket.id);
+    console.log('👤 Пользователь подключился:', socket.id);
+    console.log('📊 Всего подключено:', connectedUsers.size + 1);
     
     // Присоединение к общему чату
     socket.join('general');
     
     // Регистрация пользователя
-    socket.on('register', async (data) => {
+    socket.on('register', (data) => {
         try {
             const { username, password } = data;
             
-            // Проверяем существует ли пользователь
-            const existingUser = await usersCollection.findOne({ username });
-            if (existingUser) {
-                socket.emit('register-response', { success: false, message: 'Пользователь уже существует' });
+            console.log('Попытка регистрации:', username);
+            
+            if (!username || !password) {
+                socket.emit('register-response', { success: false, message: 'Заполните все поля' });
                 return;
             }
             
             // Создаем нового пользователя
-            await usersCollection.insertOne({
-                username,
-                password,
-                createdAt: new Date()
-            });
-            
-            socket.emit('register-response', { success: true, message: 'Регистрация успешна' });
+            db.run(
+                'INSERT INTO users (username, password) VALUES (?, ?)',
+                [username, password],
+                function(err) {
+                    if (err) {
+                        if (err.message.includes('UNIQUE constraint failed')) {
+                            console.log('❌ Пользователь уже существует:', username);
+                            socket.emit('register-response', { success: false, message: 'Пользователь уже существует' });
+                        } else {
+                            console.error('❌ Ошибка регистрации:', err.message);
+                            socket.emit('register-response', { success: false, message: 'Ошибка сервера: ' + err.message });
+                        }
+                    } else {
+                        console.log('✅ Пользователь зарегистрирован:', username);
+                        socket.emit('register-response', { success: true, message: 'Регистрация успешна' });
+                    }
+                }
+            );
         } catch (error) {
-            console.error('Ошибка регистрации:', error);
-            socket.emit('register-response', { success: false, message: 'Ошибка сервера' });
+            console.error('❌ Ошибка регистрации:', error.message);
+            socket.emit('register-response', { success: false, message: 'Ошибка сервера: ' + error.message });
         }
     });
     
     // Вход пользователя
-    socket.on('login', async (data) => {
+    socket.on('login', (data) => {
         try {
             const { username, password } = data;
             
+            console.log('Попытка входа:', username);
+            
+            if (!username || !password) {
+                socket.emit('login-response', { success: false, message: 'Заполните все поля' });
+                return;
+            }
+            
             // Ищем пользователя в БД
-            const user = await usersCollection.findOne({ username });
-            
-            if (!user) {
-                socket.emit('login-response', { success: false, message: 'Пользователь не найден' });
-                return;
-            }
-            
-            if (user.password !== password) {
-                socket.emit('login-response', { success: false, message: 'Неверный пароль' });
-                return;
-            }
-            
-            // Сохраняем сессию
-            socket.username = username;
-            connectedUsers.set(socket.id, { username, socketId: socket.id });
-            
-            socket.emit('login-response', { success: true, message: 'Вход успешен' });
-            
-            // Отправляем список всех пользователей
-            const allUsers = await usersCollection.find({}, { projection: { username: 1 } }).toArray();
-            const usersList = allUsers.map(u => u.username);
-            socket.emit('users-list', usersList);
-            
-            // Отправляем список онлайн пользователей
-            const onlineUsers = Array.from(connectedUsers.values()).map(u => u.username);
-            io.emit('online-users', onlineUsers);
-            
-            // Отправляем историю общего чата
-            const generalMessages = await messagesCollection
-                .find({ isGeneral: true })
-                .sort({ createdAt: 1 })
-                .limit(100)
-                .toArray();
-            
-            const formattedMessages = generalMessages.map(msg => ({
-                id: msg._id.toString(),
-                username: msg.from,
-                message: msg.message,
-                filename: msg.filename,
-                originalname: msg.originalname,
-                url: msg.url,
-                mimetype: msg.mimetype,
-                caption: msg.caption,
-                timestamp: new Date(msg.createdAt).toLocaleString('ru-RU'),
-                type: msg.type
-            }));
-            
-            socket.emit('load-general-messages', formattedMessages);
-            
-            // Уведомляем всех что пользователь онлайн
-            io.to('general').emit('user-status', { 
-                username: username, 
-                status: 'online' 
-            });
+            db.get(
+                'SELECT * FROM users WHERE username = ?',
+                [username],
+                (err, user) => {
+                    if (err) {
+                        console.error('❌ Ошибка входа:', err.message);
+                        socket.emit('login-response', { success: false, message: 'Ошибка сервера' });
+                        return;
+                    }
+                    
+                    if (!user) {
+                        console.log('❌ Пользователь не найден:', username);
+                        socket.emit('login-response', { success: false, message: 'Пользователь не найден' });
+                        return;
+                    }
+                    
+                    if (user.password !== password) {
+                        console.log('❌ Неверный пароль для:', username);
+                        socket.emit('login-response', { success: false, message: 'Неверный пароль' });
+                        return;
+                    }
+                    
+                    // Сохраняем сессию
+                    socket.username = username;
+                    connectedUsers.set(socket.id, { username, socketId: socket.id });
+                    
+                    console.log('✅ Пользователь вошел:', username);
+                    socket.emit('login-response', { success: true, message: 'Вход успешен' });
+                    
+                    // Отправляем список всех пользователей
+                    db.all('SELECT username FROM users', (err, users) => {
+                        if (!err && users) {
+                            const usersList = users.map(u => u.username);
+                            socket.emit('users-list', usersList);
+                        }
+                    });
+                    
+                    // Отправляем список онлайн пользователей
+                    const onlineUsers = Array.from(connectedUsers.values()).map(u => u.username);
+                    io.emit('online-users', onlineUsers);
+                    
+                    // Отправляем историю общего чата
+                    db.all(
+                        'SELECT * FROM messages WHERE isGeneral = 1 ORDER BY createdAt ASC LIMIT 100',
+                        (err, messages) => {
+                            if (!err && messages) {
+                                const formattedMessages = messages.map(msg => ({
+                                    id: msg.id.toString(),
+                                    username: msg.fromUser,
+                                    message: msg.message,
+                                    filename: msg.filename,
+                                    originalname: msg.originalname,
+                                    url: msg.url,
+                                    mimetype: msg.mimetype,
+                                    caption: msg.caption,
+                                    timestamp: msg.createdAt,
+                                    type: msg.type
+                                }));
+                                socket.emit('load-general-messages', formattedMessages);
+                            }
+                        }
+                    );
+                    
+                    // Уведомляем всех что пользователь онлайн
+                    io.to('general').emit('user-status', { 
+                        username: username, 
+                        status: 'online' 
+                    });
+                }
+            );
         } catch (error) {
-            console.error('Ошибка входа:', error);
-            socket.emit('login-response', { success: false, message: 'Ошибка сервера' });
+            console.error('❌ Ошибка входа:', error.message);
+            socket.emit('login-response', { success: false, message: 'Ошибка сервера: ' + error.message });
         }
     });
     
     // Загрузка истории приватного чата
-    socket.on('load-private-messages', async (data) => {
+    socket.on('load-private-messages', (data) => {
         try {
             const currentUser = socket.username;
             const otherUser = data.username;
             
             if (!currentUser) return;
             
-            // Ищем сообщения между двумя пользователями
-            const dialogMessages = await messagesCollection
-                .find({
-                    isGeneral: false,
-                    $or: [
-                        { from: currentUser, to: otherUser },
-                        { from: otherUser, to: currentUser }
-                    ]
-                })
-                .sort({ createdAt: 1 })
-                .limit(100)
-                .toArray();
-            
-            const formattedMessages = dialogMessages.map(msg => ({
-                id: msg._id.toString(),
-                from: msg.from,
-                to: msg.to,
-                message: msg.message,
-                filename: msg.filename,
-                originalname: msg.originalname,
-                url: msg.url,
-                mimetype: msg.mimetype,
-                caption: msg.caption,
-                timestamp: new Date(msg.createdAt).toLocaleString('ru-RU'),
-                type: msg.type
-            }));
-            
-            socket.emit('private-messages-loaded', formattedMessages);
+            db.all(
+                `SELECT * FROM messages 
+                 WHERE isGeneral = 0 AND 
+                 ((fromUser = ? AND toUser = ?) OR (fromUser = ? AND toUser = ?))
+                 ORDER BY createdAt ASC LIMIT 100`,
+                [currentUser, otherUser, otherUser, currentUser],
+                (err, messages) => {
+                    if (!err && messages) {
+                        const formattedMessages = messages.map(msg => ({
+                            id: msg.id.toString(),
+                            from: msg.fromUser,
+                            to: msg.toUser,
+                            message: msg.message,
+                            filename: msg.filename,
+                            originalname: msg.originalname,
+                            url: msg.url,
+                            mimetype: msg.mimetype,
+                            caption: msg.caption,
+                            timestamp: msg.createdAt,
+                            type: msg.type
+                        }));
+                        socket.emit('private-messages-loaded', formattedMessages);
+                    }
+                }
+            );
         } catch (error) {
             console.error('Ошибка загрузки сообщений:', error);
         }
     });
     
     // Обработка сообщений в общий чат
-    socket.on('send-message', async (data) => {
+    socket.on('send-message', (data) => {
         try {
             const username = socket.username;
             if (!username) return;
             
-            const messageData = {
-                from: username,
-                to: 'general',
-                message: data.message,
-                type: 'text',
-                isGeneral: true,
-                createdAt: new Date()
-            };
-            
-            const result = await messagesCollection.insertOne(messageData);
-            
-            const formattedMessage = {
-                id: result.insertedId.toString(),
-                username: username,
-                message: data.message,
-                timestamp: new Date().toLocaleString('ru-RU'),
-                type: 'text'
-            };
-            
-            io.to('general').emit('new-message', formattedMessage);
+            db.run(
+                `INSERT INTO messages (fromUser, toUser, message, type, isGeneral) 
+                 VALUES (?, ?, ?, ?, ?)`,
+                [username, 'general', data.message, 'text', 1],
+                function(err) {
+                    if (!err) {
+                        const formattedMessage = {
+                            id: this.lastID.toString(),
+                            username: username,
+                            message: data.message,
+                            timestamp: new Date().toLocaleString('ru-RU'),
+                            type: 'text'
+                        };
+                        io.to('general').emit('new-message', formattedMessage);
+                    }
+                }
+            );
         } catch (error) {
             console.error('Ошибка отправки сообщения:', error);
         }
     });
     
     // Обработка файлов в общий чат
-    socket.on('send-file', async (data) => {
+    socket.on('send-file', (data) => {
         try {
             const username = socket.username;
             if (!username) return;
             
-            const messageData = {
-                from: username,
-                to: 'general',
-                filename: data.filename,
-                originalname: data.originalname,
-                url: data.url,
-                mimetype: data.mimetype,
-                caption: data.caption || '',
-                type: 'file',
-                isGeneral: true,
-                createdAt: new Date()
-            };
-            
-            const result = await messagesCollection.insertOne(messageData);
-            
-            const formattedMessage = {
-                id: result.insertedId.toString(),
-                username: username,
-                filename: data.filename,
-                originalname: data.originalname,
-                url: data.url,
-                mimetype: data.mimetype,
-                caption: data.caption || '',
-                timestamp: new Date().toLocaleString('ru-RU'),
-                type: 'file'
-            };
-            
-            io.to('general').emit('new-message', formattedMessage);
+            db.run(
+                `INSERT INTO messages (fromUser, toUser, filename, originalname, url, mimetype, caption, type, isGeneral) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [username, 'general', data.filename, data.originalname, data.url, data.mimetype, data.caption || '', 'file', 1],
+                function(err) {
+                    if (!err) {
+                        const formattedMessage = {
+                            id: this.lastID.toString(),
+                            username: username,
+                            filename: data.filename,
+                            originalname: data.originalname,
+                            url: data.url,
+                            mimetype: data.mimetype,
+                            caption: data.caption || '',
+                            timestamp: new Date().toLocaleString('ru-RU'),
+                            type: 'file'
+                        };
+                        io.to('general').emit('new-message', formattedMessage);
+                    }
+                }
+            );
         } catch (error) {
             console.error('Ошибка отправки файла:', error);
         }
     });
     
     // Удаление сообщения
-    socket.on('delete-message', async (data) => {
+    socket.on('delete-message', (data) => {
         try {
-            const { ObjectId } = require('mongodb');
-            await messagesCollection.deleteOne({ _id: new ObjectId(data.id) });
-            io.emit('message-deleted', { id: data.id });
+            db.run('DELETE FROM messages WHERE id = ?', [data.id], (err) => {
+                if (!err) {
+                    io.emit('message-deleted', { id: data.id });
+                }
+            });
         } catch (error) {
             console.error('Ошибка удаления сообщения:', error);
         }
     });
     
     // Личные сообщения
-    socket.on('send-private-message', async (data) => {
+    socket.on('send-private-message', (data) => {
         try {
             const senderUsername = socket.username;
             if (!senderUsername) return;
             
             const { recipientUsername, message } = data;
             
-            // Сохраняем в БД
-            const messageData = {
-                from: senderUsername,
-                to: recipientUsername,
-                message: message,
-                type: 'text',
-                isGeneral: false,
-                createdAt: new Date()
-            };
-            
-            const result = await messagesCollection.insertOne(messageData);
-            
-            // Находим socket ID получателя
-            let recipientSocketId = null;
-            for (const [socketId, user] of connectedUsers.entries()) {
-                if (user.username === recipientUsername) {
-                    recipientSocketId = socketId;
-                    break;
+            db.run(
+                `INSERT INTO messages (fromUser, toUser, message, type, isGeneral) 
+                 VALUES (?, ?, ?, ?, ?)`,
+                [senderUsername, recipientUsername, message, 'text', 0],
+                function(err) {
+                    if (!err) {
+                        // Находим socket ID получателя
+                        let recipientSocketId = null;
+                        for (const [socketId, user] of connectedUsers.entries()) {
+                            if (user.username === recipientUsername) {
+                                recipientSocketId = socketId;
+                                break;
+                            }
+                        }
+                        
+                        const formattedMessage = {
+                            id: this.lastID.toString(),
+                            from: senderUsername,
+                            to: recipientUsername,
+                            message: message,
+                            timestamp: new Date().toLocaleString('ru-RU'),
+                            type: 'text'
+                        };
+                        
+                        // Отправляем отправителю
+                        socket.emit('private-message', formattedMessage);
+                        
+                        // Отправляем получателю если онлайн
+                        if (recipientSocketId) {
+                            io.to(recipientSocketId).emit('private-message', formattedMessage);
+                        }
+                    }
                 }
-            }
-            
-            const formattedMessage = {
-                id: result.insertedId.toString(),
-                from: senderUsername,
-                to: recipientUsername,
-                message: message,
-                timestamp: new Date().toLocaleString('ru-RU'),
-                type: 'text'
-            };
-            
-            // Отправляем отправителю
-            socket.emit('private-message', formattedMessage);
-            
-            // Отправляем получателю если онлайн
-            if (recipientSocketId) {
-                io.to(recipientSocketId).emit('private-message', formattedMessage);
-            }
+            );
         } catch (error) {
             console.error('Ошибка отправки приватного сообщения:', error);
         }
     });
     
     // Личные файлы
-    socket.on('send-private-file', async (data) => {
+    socket.on('send-private-file', (data) => {
         try {
             const senderUsername = socket.username;
             if (!senderUsername) return;
             
             const { recipientUsername, filename, originalname, url, mimetype, caption } = data;
             
-            // Сохраняем в БД
-            const messageData = {
-                from: senderUsername,
-                to: recipientUsername,
-                filename: filename,
-                originalname: originalname,
-                url: url,
-                mimetype: mimetype,
-                caption: caption || '',
-                type: 'file',
-                isGeneral: false,
-                createdAt: new Date()
-            };
-            
-            const result = await messagesCollection.insertOne(messageData);
-            
-            // Находим socket ID получателя
-            let recipientSocketId = null;
-            for (const [socketId, user] of connectedUsers.entries()) {
-                if (user.username === recipientUsername) {
-                    recipientSocketId = socketId;
-                    break;
+            db.run(
+                `INSERT INTO messages (fromUser, toUser, filename, originalname, url, mimetype, caption, type, isGeneral) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [senderUsername, recipientUsername, filename, originalname, url, mimetype, caption || '', 'file', 0],
+                function(err) {
+                    if (!err) {
+                        // Находим socket ID получателя
+                        let recipientSocketId = null;
+                        for (const [socketId, user] of connectedUsers.entries()) {
+                            if (user.username === recipientUsername) {
+                                recipientSocketId = socketId;
+                                break;
+                            }
+                        }
+                        
+                        const formattedMessage = {
+                            id: this.lastID.toString(),
+                            from: senderUsername,
+                            to: recipientUsername,
+                            filename: filename,
+                            originalname: originalname,
+                            url: url,
+                            mimetype: mimetype,
+                            caption: caption || '',
+                            timestamp: new Date().toLocaleString('ru-RU'),
+                            type: 'file'
+                        };
+                        
+                        // Отправляем отправителю
+                        socket.emit('private-message', formattedMessage);
+                        
+                        // Отправляем получателю если онлайн
+                        if (recipientSocketId) {
+                            io.to(recipientSocketId).emit('private-message', formattedMessage);
+                        }
+                    }
                 }
-            }
-            
-            const formattedMessage = {
-                id: result.insertedId.toString(),
-                from: senderUsername,
-                to: recipientUsername,
-                filename: filename,
-                originalname: originalname,
-                url: url,
-                mimetype: mimetype,
-                caption: caption || '',
-                timestamp: new Date().toLocaleString('ru-RU'),
-                type: 'file'
-            };
-            
-            // Отправляем отправителю
-            socket.emit('private-message', formattedMessage);
-            
-            // Отправляем получателю если онлайн
-            if (recipientSocketId) {
-                io.to(recipientSocketId).emit('private-message', formattedMessage);
-            }
+            );
         } catch (error) {
             console.error('Ошибка отправки приватного файла:', error);
         }
     });
     
     // Отключение
-    socket.on('disconnect', async () => {
-        console.log('Пользователь отключился:', socket.id);
+    socket.on('disconnect', () => {
+        console.log('👤 Пользователь отключился:', socket.id);
         const username = socket.username;
         
         connectedUsers.delete(socket.id);
@@ -447,8 +474,8 @@ server.listen(PORT, '0.0.0.0', () => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', async () => {
-    console.log('Закрытие соединения с MongoDB...');
-    await client.close();
+process.on('SIGINT', () => {
+    console.log('Закрытие БД...');
+    db.close();
     process.exit(0);
 });
