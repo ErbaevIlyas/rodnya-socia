@@ -4,21 +4,46 @@ const socketIo = require('socket.io');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { MongoClient } = require('mongodb');
+require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
 
+// MongoDB подключение
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://rodnya:PASSWORD@rodnya.be3oe9w.mongodb.net/?appName=rodnya';
+let db;
+let usersCollection;
+let messagesCollection;
+
+const client = new MongoClient(MONGODB_URI);
+
+async function connectDB() {
+    try {
+        await client.connect();
+        console.log('✅ Подключено к MongoDB');
+        
+        db = client.db('rodnya');
+        usersCollection = db.collection('users');
+        messagesCollection = db.collection('messages');
+        
+        // Создаем индексы для оптимизации
+        await usersCollection.createIndex({ username: 1 }, { unique: true });
+        await messagesCollection.createIndex({ createdAt: -1 });
+        
+    } catch (err) {
+        console.error('❌ Ошибка подключения к MongoDB:', err);
+        process.exit(1);
+    }
+}
+
+connectDB();
+
 // Создаем папку для загрузок если её нет
 if (!fs.existsSync('uploads')) {
     fs.mkdirSync('uploads');
 }
-
-// Простая база данных пользователей (в памяти)
-const users = new Map();
-const userSessions = new Map(); // socket.id -> username
-const messages = new Map(); // "user1-user2" -> [messages] для приватных
-const generalMessages = []; // Сообщения в общий чат
 
 // Настройка multer для загрузки файлов
 const storage = multer.diskStorage({
@@ -76,204 +101,332 @@ io.on('connection', (socket) => {
     socket.join('general');
     
     // Регистрация пользователя
-    socket.on('register', (data) => {
-        const { username, password } = data;
-        
-        if (users.has(username)) {
-            socket.emit('register-response', { success: false, message: 'Пользователь уже существует' });
-            return;
+    socket.on('register', async (data) => {
+        try {
+            const { username, password } = data;
+            
+            // Проверяем существует ли пользователь
+            const existingUser = await usersCollection.findOne({ username });
+            if (existingUser) {
+                socket.emit('register-response', { success: false, message: 'Пользователь уже существует' });
+                return;
+            }
+            
+            // Создаем нового пользователя
+            await usersCollection.insertOne({
+                username,
+                password,
+                createdAt: new Date()
+            });
+            
+            socket.emit('register-response', { success: true, message: 'Регистрация успешна' });
+        } catch (error) {
+            console.error('Ошибка регистрации:', error);
+            socket.emit('register-response', { success: false, message: 'Ошибка сервера' });
         }
-        
-        users.set(username, { password, createdAt: new Date() });
-        socket.emit('register-response', { success: true, message: 'Регистрация успешна' });
     });
     
     // Вход пользователя
-    socket.on('login', (data) => {
-        const { username, password } = data;
-        
-        if (!users.has(username)) {
-            socket.emit('login-response', { success: false, message: 'Пользователь не найден' });
-            return;
+    socket.on('login', async (data) => {
+        try {
+            const { username, password } = data;
+            
+            // Ищем пользователя в БД
+            const user = await usersCollection.findOne({ username });
+            
+            if (!user) {
+                socket.emit('login-response', { success: false, message: 'Пользователь не найден' });
+                return;
+            }
+            
+            if (user.password !== password) {
+                socket.emit('login-response', { success: false, message: 'Неверный пароль' });
+                return;
+            }
+            
+            // Сохраняем сессию
+            socket.username = username;
+            connectedUsers.set(socket.id, { username, socketId: socket.id });
+            
+            socket.emit('login-response', { success: true, message: 'Вход успешен' });
+            
+            // Отправляем список всех пользователей
+            const allUsers = await usersCollection.find({}, { projection: { username: 1 } }).toArray();
+            const usersList = allUsers.map(u => u.username);
+            socket.emit('users-list', usersList);
+            
+            // Отправляем список онлайн пользователей
+            const onlineUsers = Array.from(connectedUsers.values()).map(u => u.username);
+            io.emit('online-users', onlineUsers);
+            
+            // Отправляем историю общего чата
+            const generalMessages = await messagesCollection
+                .find({ isGeneral: true })
+                .sort({ createdAt: 1 })
+                .limit(100)
+                .toArray();
+            
+            const formattedMessages = generalMessages.map(msg => ({
+                id: msg._id.toString(),
+                username: msg.from,
+                message: msg.message,
+                filename: msg.filename,
+                originalname: msg.originalname,
+                url: msg.url,
+                mimetype: msg.mimetype,
+                caption: msg.caption,
+                timestamp: new Date(msg.createdAt).toLocaleString('ru-RU'),
+                type: msg.type
+            }));
+            
+            socket.emit('load-general-messages', formattedMessages);
+            
+            // Уведомляем всех что пользователь онлайн
+            io.to('general').emit('user-status', { 
+                username: username, 
+                status: 'online' 
+            });
+        } catch (error) {
+            console.error('Ошибка входа:', error);
+            socket.emit('login-response', { success: false, message: 'Ошибка сервера' });
         }
-        
-        const user = users.get(username);
-        if (user.password !== password) {
-            socket.emit('login-response', { success: false, message: 'Неверный пароль' });
-            return;
-        }
-        
-        userSessions.set(socket.id, username);
-        connectedUsers.set(socket.id, { username, socketId: socket.id });
-        
-        socket.emit('login-response', { success: true, message: 'Вход успешен' });
-        
-        // Отправляем список всех пользователей
-        const usersList = Array.from(users.keys());
-        socket.emit('users-list', usersList);
-        
-        // Отправляем список онлайн пользователей
-        const onlineUsers = Array.from(connectedUsers.values()).map(u => u.username);
-        io.emit('online-users', onlineUsers);
-        
-        // Отправляем историю общего чата
-        socket.emit('load-general-messages', generalMessages);
-        
-        // Уведомляем всех что пользователь онлайн
-        io.to('general').emit('user-status', { 
-            username: username, 
-            status: 'online' 
-        });
     });
     
     // Загрузка истории приватного чата
-    socket.on('load-private-messages', (data) => {
-        const currentUser = userSessions.get(socket.id);
-        const otherUser = data.username;
-        
-        if (!currentUser) return;
-        
-        const dialogKey = getDialogKey(currentUser, otherUser);
-        const dialogMessages = messages.get(dialogKey) || [];
-        
-        socket.emit('private-messages-loaded', dialogMessages);
+    socket.on('load-private-messages', async (data) => {
+        try {
+            const currentUser = socket.username;
+            const otherUser = data.username;
+            
+            if (!currentUser) return;
+            
+            // Ищем сообщения между двумя пользователями
+            const dialogMessages = await messagesCollection
+                .find({
+                    isGeneral: false,
+                    $or: [
+                        { from: currentUser, to: otherUser },
+                        { from: otherUser, to: currentUser }
+                    ]
+                })
+                .sort({ createdAt: 1 })
+                .limit(100)
+                .toArray();
+            
+            const formattedMessages = dialogMessages.map(msg => ({
+                id: msg._id.toString(),
+                from: msg.from,
+                to: msg.to,
+                message: msg.message,
+                filename: msg.filename,
+                originalname: msg.originalname,
+                url: msg.url,
+                mimetype: msg.mimetype,
+                caption: msg.caption,
+                timestamp: new Date(msg.createdAt).toLocaleString('ru-RU'),
+                type: msg.type
+            }));
+            
+            socket.emit('private-messages-loaded', formattedMessages);
+        } catch (error) {
+            console.error('Ошибка загрузки сообщений:', error);
+        }
     });
     
     // Обработка сообщений в общий чат
-    socket.on('send-message', (data) => {
-        const username = userSessions.get(socket.id);
-        if (!username) return;
-        
-        const messageData = {
-            id: Date.now(),
-            username: username,
-            message: data.message,
-            timestamp: new Date().toLocaleString('ru-RU'),
-            type: 'text'
-        };
-        
-        generalMessages.push(messageData);
-        io.to('general').emit('new-message', messageData);
+    socket.on('send-message', async (data) => {
+        try {
+            const username = socket.username;
+            if (!username) return;
+            
+            const messageData = {
+                from: username,
+                to: 'general',
+                message: data.message,
+                type: 'text',
+                isGeneral: true,
+                createdAt: new Date()
+            };
+            
+            const result = await messagesCollection.insertOne(messageData);
+            
+            const formattedMessage = {
+                id: result.insertedId.toString(),
+                username: username,
+                message: data.message,
+                timestamp: new Date().toLocaleString('ru-RU'),
+                type: 'text'
+            };
+            
+            io.to('general').emit('new-message', formattedMessage);
+        } catch (error) {
+            console.error('Ошибка отправки сообщения:', error);
+        }
     });
     
     // Обработка файлов в общий чат
-    socket.on('send-file', (data) => {
-        const username = userSessions.get(socket.id);
-        if (!username) return;
-        
-        const messageData = {
-            id: Date.now(),
-            username: username,
-            filename: data.filename,
-            originalname: data.originalname,
-            url: data.url,
-            mimetype: data.mimetype,
-            caption: data.caption || '',
-            timestamp: new Date().toLocaleString('ru-RU'),
-            type: 'file'
-        };
-        
-        generalMessages.push(messageData);
-        io.to('general').emit('new-message', messageData);
+    socket.on('send-file', async (data) => {
+        try {
+            const username = socket.username;
+            if (!username) return;
+            
+            const messageData = {
+                from: username,
+                to: 'general',
+                filename: data.filename,
+                originalname: data.originalname,
+                url: data.url,
+                mimetype: data.mimetype,
+                caption: data.caption || '',
+                type: 'file',
+                isGeneral: true,
+                createdAt: new Date()
+            };
+            
+            const result = await messagesCollection.insertOne(messageData);
+            
+            const formattedMessage = {
+                id: result.insertedId.toString(),
+                username: username,
+                filename: data.filename,
+                originalname: data.originalname,
+                url: data.url,
+                mimetype: data.mimetype,
+                caption: data.caption || '',
+                timestamp: new Date().toLocaleString('ru-RU'),
+                type: 'file'
+            };
+            
+            io.to('general').emit('new-message', formattedMessage);
+        } catch (error) {
+            console.error('Ошибка отправки файла:', error);
+        }
     });
     
     // Удаление сообщения
-    socket.on('delete-message', (data) => {
-        io.to('general').emit('message-deleted', { id: data.id });
+    socket.on('delete-message', async (data) => {
+        try {
+            const { ObjectId } = require('mongodb');
+            await messagesCollection.deleteOne({ _id: new ObjectId(data.id) });
+            io.emit('message-deleted', { id: data.id });
+        } catch (error) {
+            console.error('Ошибка удаления сообщения:', error);
+        }
     });
     
     // Личные сообщения
-    socket.on('send-private-message', (data) => {
-        const senderUsername = userSessions.get(socket.id);
-        if (!senderUsername) return;
-        
-        const { recipientUsername, message } = data;
-        
-        // Находим socket ID получателя
-        let recipientSocketId = null;
-        for (const [socketId, user] of connectedUsers.entries()) {
-            if (user.username === recipientUsername) {
-                recipientSocketId = socketId;
-                break;
+    socket.on('send-private-message', async (data) => {
+        try {
+            const senderUsername = socket.username;
+            if (!senderUsername) return;
+            
+            const { recipientUsername, message } = data;
+            
+            // Сохраняем в БД
+            const messageData = {
+                from: senderUsername,
+                to: recipientUsername,
+                message: message,
+                type: 'text',
+                isGeneral: false,
+                createdAt: new Date()
+            };
+            
+            const result = await messagesCollection.insertOne(messageData);
+            
+            // Находим socket ID получателя
+            let recipientSocketId = null;
+            for (const [socketId, user] of connectedUsers.entries()) {
+                if (user.username === recipientUsername) {
+                    recipientSocketId = socketId;
+                    break;
+                }
             }
-        }
-        
-        const messageData = {
-            id: Date.now(),
-            from: senderUsername,
-            to: recipientUsername,
-            message: message,
-            timestamp: new Date().toLocaleString('ru-RU'),
-            type: 'text'
-        };
-        
-        // Сохраняем сообщение
-        const dialogKey = getDialogKey(senderUsername, recipientUsername);
-        if (!messages.has(dialogKey)) {
-            messages.set(dialogKey, []);
-        }
-        messages.get(dialogKey).push(messageData);
-        
-        // Отправляем отправителю
-        socket.emit('private-message', messageData);
-        
-        // Отправляем получателю если онлайн
-        if (recipientSocketId) {
-            io.to(recipientSocketId).emit('private-message', messageData);
+            
+            const formattedMessage = {
+                id: result.insertedId.toString(),
+                from: senderUsername,
+                to: recipientUsername,
+                message: message,
+                timestamp: new Date().toLocaleString('ru-RU'),
+                type: 'text'
+            };
+            
+            // Отправляем отправителю
+            socket.emit('private-message', formattedMessage);
+            
+            // Отправляем получателю если онлайн
+            if (recipientSocketId) {
+                io.to(recipientSocketId).emit('private-message', formattedMessage);
+            }
+        } catch (error) {
+            console.error('Ошибка отправки приватного сообщения:', error);
         }
     });
     
     // Личные файлы
-    socket.on('send-private-file', (data) => {
-        const senderUsername = userSessions.get(socket.id);
-        if (!senderUsername) return;
-        
-        const { recipientUsername, filename, originalname, url, mimetype, caption } = data;
-        
-        // Находим socket ID получателя
-        let recipientSocketId = null;
-        for (const [socketId, user] of connectedUsers.entries()) {
-            if (user.username === recipientUsername) {
-                recipientSocketId = socketId;
-                break;
+    socket.on('send-private-file', async (data) => {
+        try {
+            const senderUsername = socket.username;
+            if (!senderUsername) return;
+            
+            const { recipientUsername, filename, originalname, url, mimetype, caption } = data;
+            
+            // Сохраняем в БД
+            const messageData = {
+                from: senderUsername,
+                to: recipientUsername,
+                filename: filename,
+                originalname: originalname,
+                url: url,
+                mimetype: mimetype,
+                caption: caption || '',
+                type: 'file',
+                isGeneral: false,
+                createdAt: new Date()
+            };
+            
+            const result = await messagesCollection.insertOne(messageData);
+            
+            // Находим socket ID получателя
+            let recipientSocketId = null;
+            for (const [socketId, user] of connectedUsers.entries()) {
+                if (user.username === recipientUsername) {
+                    recipientSocketId = socketId;
+                    break;
+                }
             }
-        }
-        
-        const messageData = {
-            id: Date.now(),
-            from: senderUsername,
-            to: recipientUsername,
-            filename: filename,
-            originalname: originalname,
-            url: url,
-            mimetype: mimetype,
-            caption: caption || '',
-            timestamp: new Date().toLocaleString('ru-RU'),
-            type: 'file'
-        };
-        
-        // Сохраняем сообщение
-        const dialogKey = getDialogKey(senderUsername, recipientUsername);
-        if (!messages.has(dialogKey)) {
-            messages.set(dialogKey, []);
-        }
-        messages.get(dialogKey).push(messageData);
-        
-        // Отправляем отправителю
-        socket.emit('private-message', messageData);
-        
-        // Отправляем получателю если онлайн
-        if (recipientSocketId) {
-            io.to(recipientSocketId).emit('private-message', messageData);
+            
+            const formattedMessage = {
+                id: result.insertedId.toString(),
+                from: senderUsername,
+                to: recipientUsername,
+                filename: filename,
+                originalname: originalname,
+                url: url,
+                mimetype: mimetype,
+                caption: caption || '',
+                timestamp: new Date().toLocaleString('ru-RU'),
+                type: 'file'
+            };
+            
+            // Отправляем отправителю
+            socket.emit('private-message', formattedMessage);
+            
+            // Отправляем получателю если онлайн
+            if (recipientSocketId) {
+                io.to(recipientSocketId).emit('private-message', formattedMessage);
+            }
+        } catch (error) {
+            console.error('Ошибка отправки приватного файла:', error);
         }
     });
     
     // Отключение
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
         console.log('Пользователь отключился:', socket.id);
-        const username = userSessions.get(socket.id);
+        const username = socket.username;
         
-        userSessions.delete(socket.id);
         connectedUsers.delete(socket.id);
         
         if (username) {
@@ -290,5 +443,12 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Сервер Родня запущен на порту ${PORT}`);
+    console.log(`🚀 Сервер Родня запущен на порту ${PORT}`);
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+    console.log('Закрытие соединения с MongoDB...');
+    await client.close();
+    process.exit(0);
 });
